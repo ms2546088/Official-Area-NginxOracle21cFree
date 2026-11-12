@@ -1,0 +1,112 @@
+# ============================================================
+# Official-Area_NginxOracle21cFree - Nginx + PHP + Oracle 21c XE Free + SSLH
+# 開發者: ms20250505~jpc
+# 首次開發日期: 2025-12-05
+# 更新日期: 2026-01-29
+# 更新: 新增 SSLH 端口多路復用，58082 同時提供 HTTP + SSH
+# ms2546088筆記-2026-01-29 新增 SSLH 容器支援遠端管理
+# ============================================================
+
+services:
+  # Oracle 21c XE Free 資料庫
+  oracle:
+    build:
+      context: ${CONFIG_PATH}/oracle/build
+      dockerfile: Dockerfile
+    image: oracle-xe-51521:21-slim
+    container_name: ${ORACLE_CONTAINER_NAME:-docker_nginxoracle_oracle}
+    network_mode: host
+    environment:
+      - TZ=${TZ:-Asia/Taipei}
+      - ORACLE_PASSWORD=${ORACLE_PASSWORD:-Admin958168@Secure!}
+      - ORACLE_DATABASE=${ORACLE_DATABASE:-XEPDB1}
+      - APP_USER=${ORACLE_APP_USER:-admin958168}
+      - APP_USER_PASSWORD=${ORACLE_APP_PASSWORD:-Admin958168@Secure!}
+    volumes:
+      - ${DATA_PATH}/oracle:/opt/oracle/oradata
+      - ${CONFIG_PATH}/oracle/init:/container-entrypoint-initdb.d:ro
+    restart: "no"
+    healthcheck:
+      test: ["CMD-SHELL", "echo 'SELECT 1 FROM DUAL;' | sqlplus -s system/$$ORACLE_PASSWORD@localhost:51521/XE || exit 1"]
+      interval: 30s
+      timeout: 30s
+      retries: 20
+      start_period: 300s
+
+  # PHP-FPM with Oracle OCI8 Support
+  php:
+    build:
+      context: ${CONFIG_PATH}/php
+      dockerfile: Dockerfile
+    image: php-fpm-oracle:8.3
+    container_name: ${CONTAINER_PREFIX:-docker_nginxoracle}_php
+    network_mode: host
+    environment:
+      - TZ=${TZ:-Asia/Taipei}
+      - LD_LIBRARY_PATH=/opt/oracle/instantclient
+      - ORACLE_HOME=/opt/oracle/instantclient
+    volumes:
+      - ${WWW_PATH}:/usr/share/nginx/html
+      - ${CONFIG_PATH}/php/php.ini:/usr/local/etc/php/php.ini:ro
+      - ${CONFIG_PATH}/php/zzz-custom.conf:/usr/local/etc/php-fpm.d/zzz-custom.conf:ro
+      - ${CONFIG_PATH}/nginx/sites:/etc/nginx/conf.d
+      - ${CONFIG_PATH}/nginx/ssl:/etc/nginx/ssl:ro
+      - ${LOG_PATH}/php:/var/log/php
+      - ${BACKUP_PATH:-../Backup-area_NginxOracle21cFree}:/backup
+      - ${PROJECT_PATH:-.}:/project:ro
+    restart: "no"
+    depends_on:
+      oracle:
+        condition: service_healthy
+
+  # Nginx 網頁伺服器
+  # ms2546088筆記-2026-01-29 修改: HTTP 端口改為 58182 (內部端口)
+  nginx:
+    image: ${NGINX_IMAGE:-nginx:alpine}
+    container_name: ${NGINX_CONTAINER_NAME:-docker_nginxoracle_nginx}
+    network_mode: host
+    environment:
+      - TZ=${TZ:-Asia/Taipei}
+    volumes:
+      - ${CONFIG_PATH}/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ${CONFIG_PATH}/nginx/sites:/etc/nginx/conf.d:ro
+      - ${CONFIG_PATH}/nginx/ssl:/etc/nginx/ssl:ro
+      - ${WWW_PATH}:/usr/share/nginx/html
+      - ${LOG_PATH}/nginx:/var/log/nginx
+    restart: "no"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:${NGINX_INTERNAL_PORT:-58182}/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      php:
+        condition: service_started
+      oracle:
+        condition: service_healthy
+
+  # SSLH 端口多路復用 (HTTP + SSH)
+  # ms2546088筆記-2026-01-29 新增
+  sslh:
+    build:
+      context: ${CONFIG_PATH}/sslh
+      dockerfile: Dockerfile
+      args:
+        SSH_ROOT_PASSWORD: ${SSH_ROOT_PASSWORD:-Admin958168@Secure!}
+    image: sslh-nginxoracle:1.0
+    container_name: ${CONTAINER_PREFIX:-docker_nginxoracle}_sslh
+    network_mode: host
+    environment:
+      - TZ=${TZ:-Asia/Taipei}
+      - SSH_ROOT_PASSWORD=${SSH_ROOT_PASSWORD:-Admin958168@Secure!}
+    restart: "no"
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep sslh && pgrep sshd || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      nginx:
+        condition: service_healthy
